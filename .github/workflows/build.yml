@@ -1,0 +1,159 @@
+
+name: Build ema 0.4 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ema-android-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Android application
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      JAVA_VERSION: "17"
+      GRADLE_VERSION: "8.9"
+      SOURCE_ARCHIVE: ema-0.4-source.zip
+      EXTRACT_DIR: ema-project
+
+    steps:
+      # 1. Получаем файлы репозитория
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Java 17
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # 3. Проверяем ZIP
+      - name: Check source archive
+        shell: bash
+        run: |
+          if [ ! -f "$SOURCE_ARCHIVE" ]; then
+            echo "::error::Не найден $SOURCE_ARCHIVE"
+            ls -la
+            exit 1
+          fi
+
+          unzip -t "$SOURCE_ARCHIVE"
+
+      # 4. Android SDK
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      # 5. Распаковываем проект
+      - name: Extract Android project
+        shell: bash
+        run: |
+          mkdir -p "$EXTRACT_DIR"
+          unzip -q "$SOURCE_ARCHIVE" -d "$EXTRACT_DIR"
+
+          PROJECT_DIR=$(find "$EXTRACT_DIR" \
+            -name settings.gradle.kts \
+            -print -quit | xargs dirname)
+
+          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            echo "::error::Структура Android-проекта не найдена"
+            find "$EXTRACT_DIR" -maxdepth 4 -type f
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Найден проект: $PROJECT_DIR"
+
+      # 6. Исправляем конфликт имени hint
+      - name: Fix Kotlin variable conflict
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT_DIR"])
+          file = project / "app/src/main/java/com/ema/assistant/MainActivity.kt"
+
+          if not file.exists():
+              raise SystemExit("MainActivity.kt не найден")
+
+          code = file.read_text(encoding="utf-8")
+
+          old = "val hint = TextView(this).apply {"
+          new = "val introText = TextView(this).apply {"
+
+          if old in code:
+              code = code.replace(old, new, 1)
+              code = code.replace(
+                  "content.addView(hint)",
+                  "content.addView(introText)",
+                  1
+              )
+
+          file.write_text(code, encoding="utf-8")
+          print("Проверка MainActivity.kt завершена.")
+          PY
+
+      # 7. Gradle
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # 8. Проверяем проект
+      - name: Validate project
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          gradle --version
+          gradle tasks --all
+
+      # 9. Собираем APK
+      - name: Build debug APK
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          gradle --no-daemon clean assembleDebug
+
+      # 10. Проверяем APK
+      - name: Verify APK
+        shell: bash
+        run: |
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK не создан"
+            exit 1
+          fi
+
+          ls -lh "$APK"
+          file "$APK"
+
+      # 11. Загружаем APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ema-0.4-apk
+          path: ema-project/ema04/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
