@@ -52,13 +52,22 @@ jobs:
 
       # 4. Android SDK
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 35
         shell: bash
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager \
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager | head -n 1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses || true
+
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
